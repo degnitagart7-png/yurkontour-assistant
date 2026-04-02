@@ -6,7 +6,7 @@
  * - Stores session history in chrome.storage.local
  */
 
-const API_URL = "http://localhost:3000/api/analyze";
+const API_URL = "https://yurkontour-assistant.vercel.app";
 
 // Open side panel on extension icon click
 chrome.action.onClicked.addListener((tab) => {
