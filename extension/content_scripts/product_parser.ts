@@ -1,7 +1,8 @@
 /**
  * Product Page Parser
- * Extracts product name, characteristics, and description from marketplace product pages.
- * Used to provide real product context to AI to prevent hallucination.
+ * Extracts product name, characteristics, and description from marketplace pages.
+ * Uses: JSON-LD structured data, meta tags (og:title, og:description), URL patterns,
+ * and CSS selectors as fallback. Designed to be resilient to site layout changes.
  */
 
 export interface ProductSpec {
@@ -17,39 +18,143 @@ export interface ProductInfo {
   url: string;
 }
 
+export interface PageContext {
+  marketplace: "ozon" | "wb" | "yandex" | null;
+  productName: string | null;
+  pageType: "product" | "chat" | "other";
+}
+
 type Marketplace = "ozon" | "wb" | "yandex" | "other";
 
 const MAX_SPECS = 50;
 const MAX_DESCRIPTION_LENGTH = 800;
 
+// ============ MARKETPLACE DETECTION ============
+
+export function detectMarketplace(): Marketplace {
+  const host = window.location.hostname;
+  if (host.includes("ozon.ru")) return "ozon";
+  if (host.includes("wildberries.ru")) return "wb";
+  if (host.includes("market.yandex.ru") || host.includes("partner.market.yandex.ru")) return "yandex";
+  return "other";
+}
+
 // ============ PAGE TYPE DETECTION ============
 
 function detectPageType(marketplace: Marketplace): "product" | "chat" | "other" {
-  const url = window.location.href.toLowerCase();
   const path = window.location.pathname.toLowerCase();
 
   switch (marketplace) {
     case "ozon":
-      // Ozon seller portal: /product/ pages are product cards, /conversations/ or /chats/ are chat
       if (path.includes("/product/") || path.includes("/products/")) return "product";
       if (path.includes("/conversation") || path.includes("/chat") || path.includes("/message")) return "chat";
       return "other";
-
     case "wb":
-      // WB seller portal: /catalog/card/ or /card/ or URL with product ID pattern
       if (path.includes("/card/") || path.includes("/catalog/") || path.includes("/content/cards")) return "product";
       if (path.includes("/chat") || path.includes("/feedback") || path.includes("/question")) return "chat";
       return "other";
-
     case "yandex":
-      // Yandex Market partner: /offer/ or /assortment/ for products
       if (path.includes("/offer") || path.includes("/assortment") || path.includes("/catalog/")) return "product";
       if (path.includes("/chat") || path.includes("/message") || path.includes("/conversation")) return "chat";
       return "other";
-
     default:
       return "other";
   }
+}
+
+// ============ JSON-LD STRUCTURED DATA ============
+
+interface JsonLdProduct {
+  name?: string;
+  description?: string;
+  brand?: { name?: string } | string;
+  sku?: string;
+  additionalProperty?: Array<{ name?: string; value?: string }>;
+}
+
+function parseJsonLd(): { name: string | null; description: string | null; specs: ProductSpec[] } {
+  const result = { name: null as string | null, description: null as string | null, specs: [] as ProductSpec[] };
+
+  try {
+    const scripts = document.querySelectorAll('script[type="application/ld+json"]');
+    for (const script of scripts) {
+      try {
+        const data = JSON.parse(script.textContent || "");
+        const items = Array.isArray(data) ? data : [data];
+
+        for (const item of items) {
+          const product = findProductInJsonLd(item);
+          if (!product) continue;
+
+          if (product.name) result.name = product.name;
+          if (product.description) result.description = truncate(product.description, MAX_DESCRIPTION_LENGTH);
+
+          if (typeof product.brand === "string" && product.brand) {
+            result.specs.push({ key: "Бренд", value: product.brand });
+          } else if (product.brand && typeof product.brand === "object" && product.brand.name) {
+            result.specs.push({ key: "Бренд", value: product.brand.name });
+          }
+
+          if (product.sku) {
+            result.specs.push({ key: "Артикул", value: product.sku });
+          }
+
+          if (Array.isArray(product.additionalProperty)) {
+            for (const prop of product.additionalProperty) {
+              if (prop.name && prop.value && result.specs.length < MAX_SPECS) {
+                result.specs.push({ key: prop.name, value: String(prop.value) });
+              }
+            }
+          }
+        }
+      } catch {
+        // Invalid JSON-LD, skip
+      }
+    }
+  } catch {
+    // No JSON-LD support
+  }
+
+  return result;
+}
+
+function findProductInJsonLd(data: any): JsonLdProduct | null {
+  if (!data || typeof data !== "object") return null;
+
+  if (data["@type"] === "Product" || data["@type"] === "IndividualProduct") {
+    return data as JsonLdProduct;
+  }
+
+  // Check @graph array
+  if (Array.isArray(data["@graph"])) {
+    for (const item of data["@graph"]) {
+      if (item["@type"] === "Product" || item["@type"] === "IndividualProduct") {
+        return item as JsonLdProduct;
+      }
+    }
+  }
+
+  return null;
+}
+
+// ============ META TAGS ============
+
+function parseMetaTags(): { name: string | null; description: string | null } {
+  const result = { name: null as string | null, description: null as string | null };
+
+  const ogTitle = document.querySelector('meta[property="og:title"]')?.getAttribute("content");
+  if (ogTitle && ogTitle.length > 2) result.name = ogTitle.trim();
+
+  const ogDesc = document.querySelector('meta[property="og:description"]')?.getAttribute("content");
+  if (ogDesc && ogDesc.length > 10) result.description = truncate(ogDesc.trim(), MAX_DESCRIPTION_LENGTH);
+
+  // Fallback to meta description
+  if (!result.description) {
+    const metaDesc = document.querySelector('meta[name="description"]')?.getAttribute("content");
+    if (metaDesc && metaDesc.length > 10) result.description = truncate(metaDesc.trim(), MAX_DESCRIPTION_LENGTH);
+  }
+
+  return result;
 }
 
 // ============ COMMON HELPERS ============
@@ -65,9 +170,6 @@ function truncate(text: string, maxLength: number): string {
   return text.slice(0, maxLength).replace(/\s+\S*$/, "") + "...";
 }
 
-/**
- * Extract key-value pairs from dl/dt/dd structures.
- */
 function parseDlPairs(root: Element | Document): ProductSpec[] {
   const specs: ProductSpec[] = [];
   const dls = root.querySelectorAll("dl");
@@ -76,22 +178,15 @@ function parseDlPairs(root: Element | Document): ProductSpec[] {
     const dts = dl.querySelectorAll("dt");
     const dds = dl.querySelectorAll("dd");
     const count = Math.min(dts.length, dds.length);
-
     for (let i = 0; i < count && specs.length < MAX_SPECS; i++) {
       const key = cleanText(dts[i].textContent);
       const value = cleanText(dds[i].textContent);
-      if (key && value) {
-        specs.push({ key, value });
-      }
+      if (key && value) specs.push({ key, value });
     }
   }
-
   return specs;
 }
 
-/**
- * Extract key-value pairs from table rows (th/td or td[0]/td[1]).
- */
 function parseTablePairs(root: Element | Document): ProductSpec[] {
   const specs: ProductSpec[] = [];
   const tables = root.querySelectorAll("table");
@@ -100,55 +195,34 @@ function parseTablePairs(root: Element | Document): ProductSpec[] {
     const rows = table.querySelectorAll("tr");
     for (const row of rows) {
       if (specs.length >= MAX_SPECS) break;
-
       const th = row.querySelector("th");
       const td = row.querySelector("td");
       if (th && td) {
         const key = cleanText(th.textContent);
         const value = cleanText(td.textContent);
-        if (key && value) {
-          specs.push({ key, value });
-        }
+        if (key && value) specs.push({ key, value });
         continue;
       }
-
-      // Two-column table without th
       const tds = row.querySelectorAll("td");
       if (tds.length >= 2) {
         const key = cleanText(tds[0].textContent);
         const value = cleanText(tds[1].textContent);
-        if (key && value) {
-          specs.push({ key, value });
-        }
+        if (key && value) specs.push({ key, value });
       }
     }
   }
-
   return specs;
 }
 
-/**
- * Extract key-value pairs from common div-based layouts.
- * Many marketplace seller panels render specs as adjacent div pairs.
- */
 function parseDivPairs(root: Element | Document): ProductSpec[] {
   const specs: ProductSpec[] = [];
-
-  // Common patterns for spec containers
   const containerSelectors = [
-    '[class*="characteristic"]',
-    '[class*="Characteristic"]',
-    '[class*="spec"]',
-    '[class*="Spec"]',
-    '[class*="attribute"]',
-    '[class*="Attribute"]',
-    '[class*="param"]',
-    '[class*="Param"]',
-    '[class*="property"]',
-    '[class*="Property"]',
-    '[data-testid*="characteristic"]',
-    '[data-testid*="spec"]',
-    '[data-testid*="attribute"]',
+    '[class*="characteristic"]', '[class*="Characteristic"]',
+    '[class*="spec"]', '[class*="Spec"]',
+    '[class*="attribute"]', '[class*="Attribute"]',
+    '[class*="param"]', '[class*="Param"]',
+    '[class*="property"]', '[class*="Property"]',
+    '[data-testid*="characteristic"]', '[data-testid*="spec"]',
   ];
 
   for (const selector of containerSelectors) {
@@ -156,75 +230,42 @@ function parseDivPairs(root: Element | Document): ProductSpec[] {
       const containers = root.querySelectorAll(selector);
       for (const container of containers) {
         if (specs.length >= MAX_SPECS) break;
-
-        // Check for key-value child divs
         const keyEl = container.querySelector(
           '[class*="key"], [class*="Key"], [class*="name"], [class*="Name"], [class*="label"], [class*="Label"]'
         );
         const valEl = container.querySelector(
           '[class*="value"], [class*="Value"], [class*="val"], [class*="Val"], [class*="content"], [class*="Content"]'
         );
-
         if (keyEl && valEl) {
           const key = cleanText(keyEl.textContent);
           const value = cleanText(valEl.textContent);
-          if (key && value && key !== value) {
-            specs.push({ key, value });
-          }
+          if (key && value && key !== value) specs.push({ key, value });
         }
       }
-    } catch {
-      // Invalid selector, skip
-    }
+    } catch { /* skip */ }
   }
-
   return specs;
 }
 
-/**
- * Find description text from common section patterns.
- */
 function findDescription(root: Element | Document): string | null {
-  // Look for "Описание" / "О товаре" sections
   const headingTexts = ["описание", "о товаре", "description"];
-  const allHeadings = root.querySelectorAll("h1, h2, h3, h4, h5, h6, [class*='title'], [class*='Title'], [class*='heading'], [class*='Heading']");
+  const allHeadings = root.querySelectorAll("h1, h2, h3, h4, h5, h6, [class*='title'], [class*='heading']");
 
   for (const heading of allHeadings) {
     const headText = heading.textContent?.toLowerCase().trim() || "";
     if (headingTexts.some((t) => headText.includes(t))) {
-      // Get the next sibling or parent's content
-      const parent = heading.parentElement;
-      if (parent) {
-        // Try next sibling element
-        let sibling = heading.nextElementSibling;
-        if (sibling) {
-          const text = cleanText(sibling.textContent);
-          if (text && text.length > 20) {
-            return truncate(text, MAX_DESCRIPTION_LENGTH);
-          }
-        }
-        // Try parent's text excluding the heading itself
-        const parentText = cleanText(parent.textContent);
-        const headingText = cleanText(heading.textContent);
-        if (parentText && headingText) {
-          const desc = parentText.replace(headingText, "").trim();
-          if (desc.length > 20) {
-            return truncate(desc, MAX_DESCRIPTION_LENGTH);
-          }
-        }
+      const sibling = heading.nextElementSibling;
+      if (sibling) {
+        const text = cleanText(sibling.textContent);
+        if (text && text.length > 20) return truncate(text, MAX_DESCRIPTION_LENGTH);
       }
     }
   }
 
-  // Fallback: look for description containers by class/data attribute
   const descSelectors = [
-    '[class*="description"]',
-    '[class*="Description"]',
-    '[data-testid*="description"]',
-    '[class*="product-text"]',
-    '[class*="ProductText"]',
-    '[class*="about-product"]',
-    '[class*="AboutProduct"]',
+    '[class*="description"]', '[class*="Description"]',
+    '[data-testid*="description"]', '[class*="product-text"]',
+    '[class*="about-product"]', '[class*="AboutProduct"]',
   ];
 
   for (const selector of descSelectors) {
@@ -232,48 +273,28 @@ function findDescription(root: Element | Document): string | null {
       const el = root.querySelector(selector);
       if (el) {
         const text = cleanText(el.textContent);
-        if (text && text.length > 20) {
-          return truncate(text, MAX_DESCRIPTION_LENGTH);
-        }
+        if (text && text.length > 20) return truncate(text, MAX_DESCRIPTION_LENGTH);
       }
-    } catch {
-      // skip
-    }
+    } catch { /* skip */ }
   }
 
   return null;
 }
 
-// ============ MARKETPLACE-SPECIFIC PARSERS ============
-
 function parseProductName(): string | null {
-  // Strategy 1: h1 tag
+  // Strategy 1: h1
   const h1 = document.querySelector("h1");
   if (h1) {
     const text = cleanText(h1.textContent);
     if (text && text.length > 2 && text.length < 300) return text;
   }
 
-  // Strategy 2: og:title meta tag
-  const ogTitle = document.querySelector('meta[property="og:title"]');
-  if (ogTitle) {
-    const content = ogTitle.getAttribute("content");
-    const text = cleanText(content);
-    if (text && text.length > 2) return text;
-  }
-
-  // Strategy 3: title-like elements
+  // Strategy 2: title-like data attributes
   const titleSelectors = [
-    '[data-testid*="product-name"]',
-    '[data-testid*="product-title"]',
-    '[class*="product-name"]',
-    '[class*="ProductName"]',
-    '[class*="product-title"]',
-    '[class*="ProductTitle"]',
-    '[class*="card-name"]',
-    '[class*="CardName"]',
+    '[data-testid*="product-name"]', '[data-testid*="product-title"]',
+    '[class*="product-name"]', '[class*="ProductName"]',
+    '[class*="product-title"]', '[class*="ProductTitle"]',
   ];
-
   for (const selector of titleSelectors) {
     try {
       const el = document.querySelector(selector);
@@ -281,62 +302,17 @@ function parseProductName(): string | null {
         const text = cleanText(el.textContent);
         if (text && text.length > 2 && text.length < 300) return text;
       }
-    } catch {
-      // skip
-    }
+    } catch { /* skip */ }
   }
 
-  // Strategy 4: document.title (last resort, often contains site name)
+  // Strategy 3: document.title (cleaned)
   const title = document.title;
   if (title) {
-    // Remove common suffixes: "- Ozon", "| Wildberries", etc.
     const cleaned = title.replace(/\s*[-|–—]\s*(Ozon|Wildberries|Яндекс|Маркет|Seller|Partner).*$/i, "").trim();
     if (cleaned.length > 2) return cleaned;
   }
 
   return null;
-}
-
-function parseOzonProduct(): Partial<ProductInfo> {
-  const specs = [
-    ...parseDlPairs(document),
-    ...parseTablePairs(document),
-    ...parseDivPairs(document),
-  ];
-
-  return {
-    name: parseProductName(),
-    specs: deduplicateSpecs(specs).slice(0, MAX_SPECS),
-    description: findDescription(document),
-  };
-}
-
-function parseWbProduct(): Partial<ProductInfo> {
-  const specs = [
-    ...parseDlPairs(document),
-    ...parseTablePairs(document),
-    ...parseDivPairs(document),
-  ];
-
-  return {
-    name: parseProductName(),
-    specs: deduplicateSpecs(specs).slice(0, MAX_SPECS),
-    description: findDescription(document),
-  };
-}
-
-function parseYandexProduct(): Partial<ProductInfo> {
-  const specs = [
-    ...parseDlPairs(document),
-    ...parseTablePairs(document),
-    ...parseDivPairs(document),
-  ];
-
-  return {
-    name: parseProductName(),
-    specs: deduplicateSpecs(specs).slice(0, MAX_SPECS),
-    description: findDescription(document),
-  };
 }
 
 function deduplicateSpecs(specs: ProductSpec[]): ProductSpec[] {
@@ -353,57 +329,67 @@ function deduplicateSpecs(specs: ProductSpec[]): ProductSpec[] {
 
 /**
  * Parse product information from the current page.
- * Returns null if we're not on a product page or nothing could be parsed.
+ * Priority: JSON-LD > meta tags > DOM selectors > document.title
  */
 export function parseProductInfo(marketplace: Marketplace): ProductInfo | null {
   const pageType = detectPageType(marketplace);
   const url = window.location.href;
 
-  // Only attempt parsing on product pages
   if (pageType !== "product") {
     return { name: null, specs: [], description: null, pageType, url };
   }
 
-  let parsed: Partial<ProductInfo>;
+  // Layer 1: JSON-LD structured data (most reliable)
+  const jsonLd = parseJsonLd();
 
-  switch (marketplace) {
-    case "ozon":
-      parsed = parseOzonProduct();
-      break;
-    case "wb":
-      parsed = parseWbProduct();
-      break;
-    case "yandex":
-      parsed = parseYandexProduct();
-      break;
-    default:
-      parsed = {
-        name: parseProductName(),
-        specs: deduplicateSpecs([
-          ...parseDlPairs(document),
-          ...parseTablePairs(document),
-          ...parseDivPairs(document),
-        ]).slice(0, MAX_SPECS),
-        description: findDescription(document),
-      };
-  }
+  // Layer 2: Meta tags
+  const meta = parseMetaTags();
 
-  const result: ProductInfo = {
-    name: parsed.name || null,
-    specs: parsed.specs || [],
-    description: parsed.description || null,
-    pageType,
-    url,
-  };
+  // Layer 3: DOM parsing (CSS selectors)
+  const domSpecs = deduplicateSpecs([
+    ...parseDlPairs(document),
+    ...parseTablePairs(document),
+    ...parseDivPairs(document),
+  ]).slice(0, MAX_SPECS);
 
-  // Only return non-empty results
+  const domDescription = findDescription(document);
+  const domName = parseProductName();
+
+  // Merge: JSON-LD > meta > DOM
+  const name = jsonLd.name || meta.name || domName || null;
+  const description = jsonLd.description || meta.description || domDescription || null;
+  const specs = deduplicateSpecs([...jsonLd.specs, ...domSpecs]).slice(0, MAX_SPECS);
+
+  const result: ProductInfo = { name, specs, description, pageType, url };
+
   if (!result.name && result.specs.length === 0 && !result.description) {
+    console.warn(`[ЮрКонтур] Не удалось извлечь данные товара с ${url}`);
     return { name: null, specs: [], description: null, pageType, url };
   }
 
-  console.log(
-    `[ЮрКонтур] Распознан товар: "${result.name || "?"}", ${result.specs.length} характеристик`,
-  );
-
+  console.log(`[ЮрКонтур] Распознан товар: "${result.name || "?"}", ${result.specs.length} характеристик`);
   return result;
+}
+
+/**
+ * Get lightweight page context for the header indicator.
+ */
+export function getPageContext(): PageContext {
+  const marketplace = detectMarketplace();
+  const mp = marketplace === "other" ? null : marketplace;
+  const pageType = detectPageType(marketplace);
+
+  let productName: string | null = null;
+  if (pageType === "product") {
+    // Quick extraction: JSON-LD > meta > h1 > title
+    const jsonLd = parseJsonLd();
+    if (jsonLd.name) {
+      productName = jsonLd.name;
+    } else {
+      const meta = parseMetaTags();
+      productName = meta.name || parseProductName();
+    }
+  }
+
+  return { marketplace: mp, productName, pageType };
 }

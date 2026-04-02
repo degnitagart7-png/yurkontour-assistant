@@ -18,6 +18,7 @@ export type ClaimCategory =
   | "delivery_delay"
   | "return_demand"
   | "court_threat"
+  | "store_block"
   | "other";
 
 export interface ProductSpec {
@@ -37,6 +38,8 @@ export interface ExtractedFacts {
   order_number: string | null;
   product: string | null;
   purchase_date: string | null;
+  tracking_number: string | null;
+  sku: string | null;
   problem: string | null;
   customer_demand: string | null;
   risk_markers: string[];

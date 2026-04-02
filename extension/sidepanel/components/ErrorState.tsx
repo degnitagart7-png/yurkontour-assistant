@@ -41,7 +41,7 @@ export function ErrorState({ error, onRetry, onReset }: ErrorStateProps) {
       {/* Description */}
       <p className="text-sm text-slate-500 mb-6 max-w-[280px] leading-relaxed">
         {isNetworkError
-          ? "Убедитесь, что backend запущен на localhost:3000 и попробуйте снова."
+          ? "Не удалось подключиться к серверу. Проверьте интернет-соединение и попробуйте снова."
           : error}
       </p>
 

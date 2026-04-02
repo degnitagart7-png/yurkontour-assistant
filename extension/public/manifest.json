@@ -8,7 +8,8 @@
     "sidePanel",
     "storage",
     "scripting",
-    "tabs"
+    "tabs",
+    "downloads"
   ],
   "background": {
     "service_worker": "background.js",
@@ -44,6 +45,7 @@
   "host_permissions": [
     "https://seller.ozon.ru/*",
     "https://seller.wildberries.ru/*",
-    "https://partner.market.yandex.ru/*"
+    "https://partner.market.yandex.ru/*",
+    "https://yurkontour-assistant.vercel.app/*"
   ]
 }

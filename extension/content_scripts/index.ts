@@ -8,7 +8,7 @@
 import { ozonParser } from "./ozon_parser";
 import { wbParser } from "./wb_parser";
 import { yandexParser } from "./yandex_parser";
-import { parseProductInfo, ProductInfo } from "./product_parser";
+import { parseProductInfo, ProductInfo, getPageContext } from "./product_parser";
 
 type Marketplace = "ozon" | "wb" | "yandex" | "other";
 
@@ -234,6 +234,12 @@ function init() {
       const mp = parser?.marketplace || "other";
       const productInfo = getProductContext(mp);
       sendResponse({ productContext: productInfo });
+      return true;
+    }
+
+    if (request.type === "GET_PAGE_CONTEXT") {
+      const ctx = getPageContext();
+      sendResponse(ctx);
       return true;
     }
 

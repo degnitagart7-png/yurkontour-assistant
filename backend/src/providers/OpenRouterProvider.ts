@@ -81,6 +81,8 @@ export class OpenRouterProvider implements AIProvider {
         order_number: this.str(raw.extracted_facts, "order_number"),
         product: this.str(raw.extracted_facts, "product"),
         purchase_date: this.str(raw.extracted_facts, "purchase_date"),
+        tracking_number: this.str(raw.extracted_facts, "tracking_number"),
+        sku: this.str(raw.extracted_facts, "sku"),
         problem: this.str(raw.extracted_facts, "problem"),
         customer_demand: this.str(raw.extracted_facts, "customer_demand"),
         risk_markers: this.strArr(raw.extracted_facts, "risk_markers"),

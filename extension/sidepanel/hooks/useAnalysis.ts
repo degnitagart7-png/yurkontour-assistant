@@ -9,6 +9,8 @@ export interface AnalysisResponse {
     order_number: string | null;
     product: string | null;
     purchase_date: string | null;
+    tracking_number: string | null;
+    sku: string | null;
     problem: string | null;
     customer_demand: string | null;
     risk_markers: string[];
@@ -64,7 +66,7 @@ export function useAnalysis() {
             );
           } else {
             // Fallback: direct API call (for dev/testing)
-            fetch("http://localhost:3000/api/analyze", {
+            fetch("https://yurkontour-assistant.vercel.app/api/analyze", {
               method: "POST",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({ message, marketplace: mp }),
